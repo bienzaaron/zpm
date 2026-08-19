@@ -673,8 +673,19 @@ const packageServerUrls: {
   https: Promise<string> | null;
 } = {http: null, https: null};
 
-export const startPackageServer = ({type}: {type: keyof typeof packageServerUrls} = {type: `http`}): Promise<string> => {
-  const serverUrl = packageServerUrls[type];
+export type CheckAuth = (
+  request: IncomingMessage,
+  parsedRequest: Request,
+) => boolean;
+
+export interface PackageServerOptions {
+  type?: keyof typeof packageServerUrls;
+  checkAuth?: CheckAuth;
+}
+
+export const startPackageServer = ({type = `http`, checkAuth: customCheckAuth}: PackageServerOptions = {}): Promise<string> => {
+  const shouldCache = customCheckAuth === undefined;
+  const serverUrl = shouldCache ? packageServerUrls[type] : null;
   if (serverUrl !== null)
     return serverUrl;
 
@@ -1324,7 +1335,7 @@ exit 0
     validAuthorizations.set(`Basic ${user.npmAuthIdent.encoded}`, user);
   }
 
-  return packageServerUrls[type] = new Promise((resolve, reject) => {
+  const packageServer = new Promise<string>((resolve, reject) => {
     const listener: http.RequestListener = (req, res) =>
       void (async () => {
         try {
@@ -1337,22 +1348,35 @@ exit 0
           if (recording !== null)
             recording.push(parsedRequest);
 
-          const {authorization} = req.headers;
-          if (authorization != null) {
-            const user = validAuthorizations.get(authorization);
-            if (!user) {
-              sendError(res, 401, `Invalid token`);
-              return;
+          const defaultCheckAuth: CheckAuth = (req, parsedRequest) => {
+            const {authorization} = req.headers;
+            if (authorization != null) {
+              const user = validAuthorizations.get(authorization);
+              if (!user) {
+                sendError(res, 401, `Invalid token`);
+                return false;
+              }
+
+              if (!applyOtpValidation(req, res, user))
+                return false;
+
+              if (parsedRequest.type === RequestType.Whoami) {
+                parsedRequest.login = user;
+              }
+            } else if (needsAuth(parsedRequest)) {
+              sendError(res, 401, `Authentication required`);
+              return false;
             }
 
-            if (!applyOtpValidation(req, res, user))
-              return;
+            return true;
+          };
 
-            if (parsedRequest.type === RequestType.Whoami) {
-              parsedRequest.login = user;
-            }
-          } else if (needsAuth(parsedRequest)) {
-            sendError(res, 401, `Authentication required`);
+          const checkAuth = customCheckAuth ?? defaultCheckAuth;
+
+          if (!checkAuth(req, parsedRequest)) {
+            if (!res.writableEnded)
+              sendError(res, 401, `Authentication required`);
+
             return;
           }
 
@@ -1387,6 +1411,11 @@ exit 0
       });
     })();
   });
+
+  if (shouldCache)
+    packageServerUrls[type] = packageServer;
+
+  return packageServer;
 };
 
 const proxyServerUrls: {
