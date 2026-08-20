@@ -636,6 +636,7 @@ export const getPackageArchiveHash = async (
 export const getPackageHttpArchivePath = async (
   name: string,
   version: string,
+  serverUrl?: string,
 ): Promise<string> => {
   const packageEntry = await getPackageEntry(name);
   if (!packageEntry)
@@ -647,8 +648,8 @@ export const getPackageHttpArchivePath = async (
 
   const localName = name.replace(/^@[^/]+\//, ``);
 
-  const serverUrl = await startPackageServer();
-  const archiveUrl = `${serverUrl}/${name}/-/${localName}-${version}.tgz`;
+  const archiveServerUrl = serverUrl ?? await startPackageServer();
+  const archiveUrl = `${archiveServerUrl}/${name}/-/${localName}-${version}.tgz`;
 
   return archiveUrl;
 };
@@ -688,6 +689,8 @@ export const startPackageServer = ({type = `http`, checkAuth: customCheckAuth}: 
   const serverUrl = shouldCache ? packageServerUrls[type] : null;
   if (serverUrl !== null)
     return serverUrl;
+
+  let packageServerUrl: string;
 
   const applyOtpValidation = (req: IncomingMessage, res: ServerResponse, user: Login) => {
     const otp = req.headers[`npm-otp`];
@@ -767,8 +770,8 @@ export const startPackageServer = ({type = `http`, checkAuth: customCheckAuth}: 
                   dist: {
                     shasum: await getPackageArchiveHash(name, version),
                     tarball: (localName === `unconventional-tarball` || localName === `private-unconventional-tarball`)
-                      ? (await getPackageHttpArchivePath(name, version)).replace(`/-/`, `/tralala/`)
-                      : await getPackageHttpArchivePath(name, version),
+                      ? (await getPackageHttpArchivePath(name, version, packageServerUrl)).replace(`/-/`, `/tralala/`)
+                      : await getPackageHttpArchivePath(name, version, packageServerUrl),
                   },
                 }),
               };
@@ -820,8 +823,8 @@ export const startPackageServer = ({type = `http`, checkAuth: customCheckAuth}: 
         dist: {
           shasum: await getPackageArchiveHash(name, version),
           tarball: (localName === `unconventional-tarball` || localName === `private-unconventional-tarball`)
-            ? (await getPackageHttpArchivePath(name, version)).replace(`/-/`, `/tralala/`)
-            : await getPackageHttpArchivePath(name, version),
+            ? (await getPackageHttpArchivePath(name, version, packageServerUrl)).replace(`/-/`, `/tralala/`)
+            : await getPackageHttpArchivePath(name, version, packageServerUrl),
         },
       }));
 
@@ -839,13 +842,11 @@ export const startPackageServer = ({type = `http`, checkAuth: customCheckAuth}: 
         return;
       }
 
-      const serverUrl = await startPackageServer();
-
       const releases = Object.fromEntries(Object.entries(project).map(([version, release]) => {
         return [version, release.files.map(file => ({
           filename: file.filename,
           packagetype: file.packagetype,
-          url: `${serverUrl}${file.path}`,
+          url: `${packageServerUrl}${file.path}`,
           upload_time_iso_8601: file.uploadTime,
         }))];
       }));
@@ -871,8 +872,6 @@ export const startPackageServer = ({type = `http`, checkAuth: customCheckAuth}: 
         return;
       }
 
-      const serverUrl = await startPackageServer();
-
       response.writeHead(200, {[`Content-Type`]: `application/json`});
       response.end(JSON.stringify({
         info: {
@@ -883,7 +882,7 @@ export const startPackageServer = ({type = `http`, checkAuth: customCheckAuth}: 
         urls: release.files.map(file => ({
           filename: file.filename,
           packagetype: file.packagetype,
-          url: `${serverUrl}${file.path}`,
+          url: `${packageServerUrl}${file.path}`,
           upload_time_iso_8601: file.uploadTime,
         })),
       }));
@@ -1112,7 +1111,6 @@ export const startPackageServer = ({type = `http`, checkAuth: customCheckAuth}: 
 
       const {platform} = parsedRequest;
       const name = `@yarnpkg/yarn-${platform}`;
-      const serverUrl = await startPackageServer();
 
       // Return package info with available versions
       const data = JSON.stringify({
@@ -1124,7 +1122,7 @@ export const startPackageServer = ({type = `http`, checkAuth: customCheckAuth}: 
             bin: {yarn: `yarn-bin`},
             dist: {
               shasum: `fake-shasum-6.0.0`,
-              tarball: `${serverUrl}/@yarnpkg/yarn-${platform}/-/yarn-${platform}-6.0.0.tgz`,
+              tarball: `${packageServerUrl}/@yarnpkg/yarn-${platform}/-/yarn-${platform}-6.0.0.tgz`,
             },
           },
         },
@@ -1407,7 +1405,8 @@ exit 0
       server.unref();
       server.listen(() => {
         const {port} = server.address() as AddressInfo;
-        resolve(`${type}://localhost:${port}`);
+        packageServerUrl = `${type}://localhost:${port}`;
+        resolve(packageServerUrl);
       });
     })();
   });
