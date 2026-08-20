@@ -29,7 +29,8 @@ pub async fn resolve_nodejs_version(context: &InstallContext<'_>, range: &zpm_se
     let release_url
         = format!("{}/index.json", project.config.settings.node_dist_url.value);
 
-    let node_dist_auth_header = project.config.settings.node_dist_auth_header.value.as_deref();
+    let node_dist_auth_header = project.config.settings.node_dist_auth_header.value.as_ref()
+        .map(|header| header.value.as_str());
 
     let text = project.http_client.get(&release_url)?
         .header("authorization", node_dist_auth_header)
@@ -158,7 +159,8 @@ pub async fn fetch_nodejs_locator<'a>(context: &InstallContext<'a>, locator: &Lo
     let url
         = format!("{}/v{}/node-v{}-{}.tar.gz", project.config.settings.node_dist_url.value, version_str, version_str, file_name);
 
-    let node_dist_auth_header = project.config.settings.node_dist_auth_header.value.as_deref();
+    let node_dist_auth_header = project.config.settings.node_dist_auth_header.value.as_ref()
+        .map(|header| header.value.as_str());
 
     let package_cache = context.package_cache
         .expect("The package cache is required for fetching npm packages");
