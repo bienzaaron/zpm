@@ -684,12 +684,14 @@ export interface PackageServerOptions {
   checkAuth?: CheckAuth;
 }
 
-export const startPackageServer = ({type = `http`, checkAuth: customCheckAuth}: PackageServerOptions = {}): Promise<string> => {
-  const shouldCache = customCheckAuth === undefined;
-  const serverUrl = shouldCache ? packageServerUrls[type] : null;
-  if (serverUrl !== null)
-    return serverUrl;
+export interface CustomPackageServerOptions extends PackageServerOptions {
+  checkAuth: CheckAuth;
+}
 
+const createPackageServer = (
+  {type = `http`, checkAuth: customCheckAuth}: PackageServerOptions,
+  onListen?: (server: http.Server | https.Server) => void,
+): Promise<string> => {
   let packageServerUrl: string;
 
   const applyOtpValidation = (req: IncomingMessage, res: ServerResponse, user: Login) => {
@@ -1406,15 +1408,46 @@ exit 0
       server.listen(() => {
         const {port} = server.address() as AddressInfo;
         packageServerUrl = `${type}://localhost:${port}`;
+        onListen?.(server);
         resolve(packageServerUrl);
       });
     })();
   });
 
-  if (shouldCache)
-    packageServerUrls[type] = packageServer;
-
   return packageServer;
+};
+
+export const startPackageServer = ({type = `http`}: Pick<PackageServerOptions, `type`> = {}): Promise<string> => {
+  return packageServerUrls[type] ??= createPackageServer({type});
+};
+
+export const withPackageServer = async <T>(
+  options: CustomPackageServerOptions,
+  callback: (serverUrl: string) => Promise<T>,
+): Promise<T> => {
+  let server: http.Server | https.Server | undefined;
+  const serverUrl = await createPackageServer(options, value => {
+    server = value;
+  });
+
+  const packageServer = server;
+  if (packageServer === undefined)
+    throw new Error(`Assertion failed: Package server didn't start`);
+
+  try {
+    return await callback(serverUrl);
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      packageServer.close(error => {
+        if (error) {
+          reject(error);
+        } else {
+          resolve();
+        }
+      });
+      packageServer.closeAllConnections();
+    });
+  }
 };
 
 const proxyServerUrls: {

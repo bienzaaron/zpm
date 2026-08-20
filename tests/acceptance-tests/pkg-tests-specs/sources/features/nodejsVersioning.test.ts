@@ -1,7 +1,7 @@
 import {Filename, ppath, PortablePath, xfs} from '@yarnpkg/fslib';
 import {tests, yarn}                        from 'pkg-tests-core';
 
-const {RequestType, startPackageServer} = tests;
+const {RequestType, withPackageServer} = tests;
 
 describe(`Features`, () => {
   describe(`Node.js Versioning`, () => {
@@ -75,26 +75,26 @@ describe(`Features`, () => {
         }, async ({run}) => {
           const authHeader = `Bearer node-dist-token`;
           const requestTypes = new Set<string>();
-          const serverUrl = await startPackageServer({
+          await withPackageServer({
             checkAuth: (request, parsedRequest) => {
               requestTypes.add(parsedRequest.type);
               return request.headers.authorization === authHeader;
             },
-          });
+          }, async serverUrl => {
+            await run(`install`, {
+              nodeDistUrl: `${serverUrl}/node/dist`,
+              nodeDistAuthHeader: authHeader,
+              env: {
+                YARN_CPU_OVERRIDE: `x64`,
+                YARN_OS_OVERRIDE: `linux`,
+              },
+            });
 
-          await run(`install`, {
-            nodeDistUrl: `${serverUrl}/node/dist`,
-            nodeDistAuthHeader: authHeader,
-            env: {
-              YARN_CPU_OVERRIDE: `x64`,
-              YARN_OS_OVERRIDE: `linux`,
-            },
+            expect(requestTypes).toEqual(new Set([
+              RequestType.NodeDistIndex,
+              RequestType.NodeDistTarball,
+            ]));
           });
-
-          expect(requestTypes).toEqual(new Set([
-            RequestType.NodeDistIndex,
-            RequestType.NodeDistTarball,
-          ]));
         }),
       );
 
@@ -120,26 +120,26 @@ describe(`Features`, () => {
             const validAuthHeader = `Bearer valid-node-dist-token`;
             const authHeader = `Bearer invalid-node-dist-token`;
             const receivedAuthHeaders = new Map<string, string | undefined>();
-            const serverUrl = await startPackageServer({
+            await withPackageServer({
               checkAuth: (request, parsedRequest) => {
                 receivedAuthHeaders.set(parsedRequest.type, request.headers.authorization);
                 return parsedRequest.type !== failedRequestType
                   || request.headers.authorization === validAuthHeader;
               },
+            }, async serverUrl => {
+              await expect(run(`install`, {
+                nodeDistUrl: `${serverUrl}/node/dist`,
+                nodeDistAuthHeader: authHeader,
+                env: {
+                  YARN_CPU_OVERRIDE: `x64`,
+                  YARN_OS_OVERRIDE: `linux`,
+                },
+              })).rejects.toThrow(errorPattern);
+
+              expect(receivedAuthHeaders).toEqual(new Map(
+                expectedRequestTypes.map(requestType => [requestType, authHeader] as const),
+              ));
             });
-
-            await expect(run(`install`, {
-              nodeDistUrl: `${serverUrl}/node/dist`,
-              nodeDistAuthHeader: authHeader,
-              env: {
-                YARN_CPU_OVERRIDE: `x64`,
-                YARN_OS_OVERRIDE: `linux`,
-              },
-            })).rejects.toThrow(errorPattern);
-
-            expect(receivedAuthHeaders).toEqual(new Map(
-              expectedRequestTypes.map(requestType => [requestType, authHeader] as const),
-            ));
           }),
         );
       }
