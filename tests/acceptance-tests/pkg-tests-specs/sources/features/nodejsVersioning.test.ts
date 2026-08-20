@@ -1,5 +1,7 @@
 import {Filename, ppath, PortablePath, xfs} from '@yarnpkg/fslib';
-import {yarn}                               from 'pkg-tests-core';
+import {tests, yarn}                        from 'pkg-tests-core';
+
+const {RequestType, startPackageServer} = tests;
 
 describe(`Features`, () => {
   describe(`Node.js Versioning`, () => {
@@ -62,6 +64,86 @@ describe(`Features`, () => {
         expect(stdout.trim()).toMatch(/^node-v22.0.0-linux-x64$/);
       }),
     );
+
+    describe(`Distribution authentication`, () => {
+      test(
+        `it should send the configured authorization header`,
+        makeTemporaryEnv({
+          dependencies: {
+            [`@yarnpkg/node`]: `builtin:^22.0.0`,
+          },
+        }, async ({run}) => {
+          const authHeader = `Bearer node-dist-token`;
+          const requestTypes = new Set<string>();
+          const serverUrl = await startPackageServer({
+            checkAuth: (request, parsedRequest) => {
+              requestTypes.add(parsedRequest.type);
+              return request.headers.authorization === authHeader;
+            },
+          });
+
+          await run(`install`, {
+            nodeDistUrl: `${serverUrl}/node/dist`,
+            nodeDistAuthHeader: authHeader,
+            env: {
+              YARN_CPU_OVERRIDE: `x64`,
+              YARN_OS_OVERRIDE: `linux`,
+            },
+          });
+
+          expect(requestTypes).toEqual(new Set([
+            RequestType.NodeDistIndex,
+            RequestType.NodeDistTarball,
+          ]));
+        }),
+      );
+
+      for (const {failedRequestType, expectedRequestTypes, errorPattern} of [
+        {
+          failedRequestType: RequestType.NodeDistIndex,
+          expectedRequestTypes: [RequestType.NodeDistIndex],
+          errorPattern: /Network error: HTTP status client error \(401 Unauthorized\) for url .*\/node\/dist\/index\.json/,
+        },
+        {
+          failedRequestType: RequestType.NodeDistTarball,
+          expectedRequestTypes: [RequestType.NodeDistIndex, RequestType.NodeDistTarball],
+          errorPattern: /Network error: HTTP status client error \(401 Unauthorized\) for url .*\/node\/dist\/v22\.0\.0\/node-v22\.0\.0-linux-x64\.tar\.gz/,
+        },
+      ]) {
+        test(
+          `it should fail with a descriptive error when the server returns a 401 for ${failedRequestType}`,
+          makeTemporaryEnv({
+            dependencies: {
+              [`@yarnpkg/node`]: `builtin:^22.0.0`,
+            },
+          }, async ({run}) => {
+            const validAuthHeader = `Bearer valid-node-dist-token`;
+            const authHeader = `Bearer invalid-node-dist-token`;
+            const receivedAuthHeaders = new Map<string, string | undefined>();
+            const serverUrl = await startPackageServer({
+              checkAuth: (request, parsedRequest) => {
+                receivedAuthHeaders.set(parsedRequest.type, request.headers.authorization);
+                return parsedRequest.type !== failedRequestType
+                  || request.headers.authorization === validAuthHeader;
+              },
+            });
+
+            await expect(run(`install`, {
+              nodeDistUrl: `${serverUrl}/node/dist`,
+              nodeDistAuthHeader: authHeader,
+              env: {
+                YARN_CPU_OVERRIDE: `x64`,
+                YARN_OS_OVERRIDE: `linux`,
+              },
+            })).rejects.toThrow(errorPattern);
+
+            expect(receivedAuthHeaders).toEqual(new Map(
+              expectedRequestTypes.map(requestType => [requestType, authHeader] as const),
+            ));
+          }),
+        );
+      }
+    });
 
     describe(`Monorepo support`, () => {
       test(
