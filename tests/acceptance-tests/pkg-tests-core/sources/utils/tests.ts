@@ -677,6 +677,7 @@ const packageServerUrls: {
 export type CheckAuth = (
   request: IncomingMessage,
   parsedRequest: Request,
+  response: ServerResponse,
 ) => boolean;
 
 export interface PackageServerOptions {
@@ -1373,7 +1374,7 @@ exit 0
 
           const checkAuth = customCheckAuth ?? defaultCheckAuth;
 
-          if (!checkAuth(req, parsedRequest)) {
+          if (!checkAuth(req, parsedRequest, res)) {
             if (!res.writableEnded)
               sendError(res, 401, `Authentication required`);
 

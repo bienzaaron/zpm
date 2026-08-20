@@ -72,7 +72,7 @@ describe(`Features`, () => {
           dependencies: {
             [`@yarnpkg/node`]: `builtin:^22.0.0`,
           },
-        }, async ({run}) => {
+        }, async ({path, run}) => {
           const authHeader = `Bearer node-dist-token`;
           const requestTypes = new Set<string>();
           await withPackageServer({
@@ -81,9 +81,18 @@ describe(`Features`, () => {
               return request.headers.authorization === authHeader;
             },
           }, async serverUrl => {
+            const nodeDistUrl = `${serverUrl}/node/dist`;
+
+            await yarn.writeConfiguration(path, {
+              nodeDistAuth: {
+                [nodeDistUrl]: {
+                  authorization: authHeader,
+                },
+              },
+            });
+
             await run(`install`, {
-              nodeDistUrl: `${serverUrl}/node/dist`,
-              nodeDistAuthHeader: authHeader,
+              nodeDistUrl: `${nodeDistUrl}/`,
               env: {
                 YARN_CPU_OVERRIDE: `x64`,
                 YARN_OS_OVERRIDE: `linux`,
@@ -116,7 +125,7 @@ describe(`Features`, () => {
             dependencies: {
               [`@yarnpkg/node`]: `builtin:^22.0.0`,
             },
-          }, async ({run}) => {
+          }, async ({path, run}) => {
             const validAuthHeader = `Bearer valid-node-dist-token`;
             const authHeader = `Bearer invalid-node-dist-token`;
             const receivedAuthHeaders = new Map<string, string | undefined>();
@@ -127,9 +136,18 @@ describe(`Features`, () => {
                   || request.headers.authorization === validAuthHeader;
               },
             }, async serverUrl => {
+              const nodeDistUrl = `${serverUrl}/node/dist`;
+
+              await yarn.writeConfiguration(path, {
+                nodeDistAuth: {
+                  [nodeDistUrl]: {
+                    authorization: authHeader,
+                  },
+                },
+              });
+
               await expect(run(`install`, {
-                nodeDistUrl: `${serverUrl}/node/dist`,
-                nodeDistAuthHeader: authHeader,
+                nodeDistUrl,
                 env: {
                   YARN_CPU_OVERRIDE: `x64`,
                   YARN_OS_OVERRIDE: `linux`,
@@ -143,6 +161,151 @@ describe(`Features`, () => {
           }),
         );
       }
+
+      test(
+        `it should not send authorization configured for another distribution URL`,
+        makeTemporaryEnv({
+          dependencies: {
+            [`@yarnpkg/node`]: `builtin:^22.0.0`,
+          },
+        }, async ({path, run}) => {
+          const requestTypes = new Set<string>();
+          await withPackageServer({
+            checkAuth: (request, parsedRequest) => {
+              requestTypes.add(parsedRequest.type);
+              return request.headers.authorization === undefined;
+            },
+          }, async serverUrl => {
+            await yarn.writeConfiguration(path, {
+              nodeDistAuth: {
+                [`${serverUrl}/another/dist`]: {
+                  authorization: `Bearer must-not-leak`,
+                },
+                [`${serverUrl}/node/dist//`]: {
+                  authorization: `Bearer must-not-leak-on-a-different-path`,
+                },
+                [`https://trusted.example.com/node/dist`]: {
+                  authorization: `Bearer must-not-leak-either`,
+                },
+              },
+            });
+
+            await run(`install`, {
+              nodeDistUrl: `${serverUrl}/node/dist`,
+              env: {
+                YARN_CPU_OVERRIDE: `x64`,
+                YARN_OS_OVERRIDE: `linux`,
+              },
+            });
+
+            expect(requestTypes).toEqual(new Set([
+              RequestType.NodeDistIndex,
+              RequestType.NodeDistTarball,
+            ]));
+          });
+        }),
+      );
+
+      test(
+        `it should not follow authenticated redirects outside the distribution base URL`,
+        makeTemporaryEnv({
+          dependencies: {
+            [`@yarnpkg/node`]: `builtin:^22.0.0`,
+          },
+        }, async ({path, run}) => {
+          const authHeader = `Bearer node-dist-token`;
+          const requestTypes = new Set<string>();
+          let serverUrl: string;
+
+          await withPackageServer({
+            checkAuth: (request, parsedRequest, response) => {
+              requestTypes.add(parsedRequest.type);
+
+              if (parsedRequest.type === RequestType.NodeDistIndex) {
+                response.writeHead(302, {location: `${serverUrl}/no-deps`});
+                response.end();
+                return false;
+              }
+
+              return request.headers.authorization === undefined;
+            },
+          }, async value => {
+            serverUrl = value;
+            const nodeDistUrl = `${serverUrl}/node/dist`;
+
+            await yarn.writeConfiguration(path, {
+              nodeDistAuth: {
+                [nodeDistUrl]: {
+                  authorization: authHeader,
+                },
+              },
+            });
+
+            await expect(run(`install`, {
+              nodeDistUrl,
+              httpRetry: 0,
+              env: {
+                YARN_CPU_OVERRIDE: `x64`,
+                YARN_OS_OVERRIDE: `linux`,
+              },
+            })).rejects.toThrow(/error following redirect/);
+
+            expect(requestTypes).toEqual(new Set([
+              RequestType.NodeDistIndex,
+            ]));
+          });
+        }),
+      );
+
+      test(
+        `it should reject ambiguous normalized authentication URLs`,
+        makeTemporaryEnv({
+          dependencies: {
+            [`@yarnpkg/node`]: `builtin:^22.0.0`,
+          },
+        }, async ({path, run}) => {
+          const nodeDistUrl = `https://trusted.example.com/node/dist`;
+
+          await yarn.writeConfiguration(path, {
+            nodeDistAuth: {
+              [nodeDistUrl]: {
+                authorization: `Bearer first-token`,
+              },
+              [`${nodeDistUrl}/`]: {
+                authorization: `Bearer second-token`,
+              },
+            },
+          });
+
+          await expect(run(`install`, {
+            nodeDistUrl,
+          })).rejects.toThrow(/Invalid config value for nodeDistAuth \(contains multiple entries for the configured nodeDistUrl\)/);
+        }),
+      );
+
+      test(
+        `it should not downgrade an authenticated HTTPS distribution URL`,
+        makeTemporaryEnv({
+          dependencies: {
+            [`@yarnpkg/node`]: `builtin:^22.0.0`,
+          },
+        }, async ({path, run}) => {
+          const nodeDistUrl = `https://trusted.example.com/node/dist`;
+
+          await yarn.writeConfiguration(path, {
+            nodeDistAuth: {
+              [nodeDistUrl]: {
+                authorization: `Bearer node-dist-token`,
+              },
+            },
+          });
+
+          await expect(run(`install`, {
+            nodeDistUrl,
+            enforceUnsafeHttp: true,
+          })).rejects.toThrow(/Invalid config value for nodeDistAuth \(cannot authenticate an HTTPS distribution URL when enforceUnsafeHttp is enabled\)/);
+        }),
+      );
     });
 
     describe(`Monorepo support`, () => {

@@ -2,6 +2,8 @@ use std::{borrow::Cow, collections::BTreeMap, iter::once, str::FromStr};
 
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
+use url::Url;
+use zpm_config::Configuration;
 use zpm_formats::{Entry, iter_ext::IterExt};
 use zpm_parsers::JsonDocument;
 use zpm_primitives::{BuiltinRange, BuiltinReference, Descriptor, Ident, Locator};
@@ -18,6 +20,73 @@ static PLATFORM_VARIANTS: &[(System, &str, &str)] = &[
     (System::new(Some(Cpu::Aarch64), Some(Os::MacOS), None), "darwin-arm64", "bin/node"),
 ];
 
+fn normalize_node_dist_base_url(value: &str, setting_name: &str) -> Result<Url, Error> {
+    let mut url
+        = Url::parse(value)
+            .map_err(|error| Error::InvalidConfigValue(setting_name.to_string(), error.to_string()))?;
+
+    if !matches!(url.scheme(), "http" | "https")
+        || url.cannot_be_a_base()
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(Error::InvalidConfigValue(
+            setting_name.to_string(),
+            "must be an HTTP(S) base URL without credentials, a query, or a fragment".to_string(),
+        ));
+    }
+
+    if !url.path().ends_with('/') {
+        let path
+            = format!("{}/", url.path());
+        url.set_path(&path);
+    }
+
+    Ok(url)
+}
+
+fn get_node_dist_configuration<'a>(config: &'a Configuration, enforce_unsafe_http: bool) -> Result<(Url, Option<&'a str>), Error> {
+    let base_url
+        = normalize_node_dist_base_url(&config.settings.node_dist_url.value, "nodeDistUrl")?;
+
+    let mut matching_authorization
+        = None;
+    let mut found_match
+        = false;
+
+    for (candidate, authentication) in &config.settings.node_dist_auth {
+        let candidate_url
+            = normalize_node_dist_base_url(candidate, "nodeDistAuth")?;
+
+        if candidate_url != base_url {
+            continue;
+        }
+
+        if found_match {
+            return Err(Error::InvalidConfigValue(
+                "nodeDistAuth".to_string(),
+                "contains multiple entries for the configured nodeDistUrl".to_string(),
+            ));
+        }
+
+        found_match = true;
+        matching_authorization = authentication.authorization.value.as_ref()
+            .map(|authorization| authorization.value.as_str());
+    }
+
+    if matching_authorization.is_some() && enforce_unsafe_http && base_url.scheme() == "https" {
+        return Err(Error::InvalidConfigValue(
+            "nodeDistAuth".to_string(),
+            "cannot authenticate an HTTPS distribution URL when enforceUnsafeHttp is enabled".to_string(),
+        ));
+    }
+
+    Ok((base_url, matching_authorization))
+}
+
 pub async fn resolve_nodejs_version(context: &InstallContext<'_>, range: &zpm_semver::Range) -> Result<Option<zpm_semver::Version>, Error> {
     if let Some(version) = range.exact_version() {
         return Ok(Some(version));
@@ -26,14 +95,13 @@ pub async fn resolve_nodejs_version(context: &InstallContext<'_>, range: &zpm_se
     let project = context.project
         .expect("The project is required for resolving a workspace package");
 
+    let (node_dist_url, node_dist_authorization)
+        = get_node_dist_configuration(&project.config, project.http_client.config.enforce_unsafe_http)?;
     let release_url
-        = format!("{}/index.json", project.config.settings.node_dist_url.value);
+        = node_dist_url.join("index.json")?;
 
-    let node_dist_auth_header = project.config.settings.node_dist_auth_header.value.as_ref()
-        .map(|header| header.value.as_str());
-
-    let text = project.http_client.get(&release_url)?
-        .header("authorization", node_dist_auth_header)
+    let text = project.http_client.get(release_url.as_str())?
+        .header("authorization", node_dist_authorization)
         .send().await?
         .text().await?;
 
@@ -156,11 +224,10 @@ pub async fn fetch_nodejs_locator<'a>(context: &InstallContext<'a>, locator: &Lo
     let version_str
         = version.to_file_string();
 
+    let (node_dist_url, node_dist_authorization)
+        = get_node_dist_configuration(&project.config, project.http_client.config.enforce_unsafe_http)?;
     let url
-        = format!("{}/v{}/node-v{}-{}.tar.gz", project.config.settings.node_dist_url.value, version_str, version_str, file_name);
-
-    let node_dist_auth_header = project.config.settings.node_dist_auth_header.value.as_ref()
-        .map(|header| header.value.as_str());
+        = node_dist_url.join(&format!("v{}/node-v{}-{}.tar.gz", version_str, version_str, file_name))?;
 
     let package_cache = context.package_cache
         .expect("The package cache is required for fetching npm packages");
@@ -182,8 +249,8 @@ pub async fn fetch_nodejs_locator<'a>(context: &InstallContext<'a>, locator: &Lo
 
     let cached_blob = package_cache.ensure_blob(locator.clone(), ".zip", || async move {
         let bytes
-            = project.http_client.get(&url)?
-                .header("authorization", node_dist_auth_header)
+            = project.http_client.get(url.as_str())?
+                .header("authorization", node_dist_authorization)
                 .send().await?
                 .error_for_status()?
                 .bytes().await?;

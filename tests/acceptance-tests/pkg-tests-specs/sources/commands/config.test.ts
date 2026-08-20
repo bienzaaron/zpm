@@ -76,7 +76,9 @@ describe(`Commands`, () => {
     test(`should redact secrets by default`, makeTemporaryEnv({}, async ({path, run}) => {
       await xfs.writeFilePromise(ppath.join(path, RC_FILENAME), [
         `npmAuthToken: super-secret-token`,
-        `nodeDistAuthHeader: Bearer super-secret-header`,
+        `nodeDistAuth:`,
+        `  "https://node.example.com/dist":`,
+        `    authorization: Bearer super-secret-header`,
       ].join(`\n`));
 
       const {stdout} = await run(`config`, `--json`);
@@ -92,7 +94,9 @@ describe(`Commands`, () => {
       // redaction.
       await xfs.writeFilePromise(ppath.join(path, RC_FILENAME), [
         `npmAuthToken: super-secret-token`,
-        `nodeDistAuthHeader: Bearer super-secret-header`,
+        `nodeDistAuth:`,
+        `  "https://node.example.com/dist":`,
+        `    authorization: Bearer super-secret-header`,
       ].join(`\n`));
 
       const {stdout} = await run(`config`, `--no-redacted`, `--json`);

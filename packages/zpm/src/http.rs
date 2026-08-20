@@ -7,6 +7,8 @@ use http::HeaderMap;
 use itertools::Itertools;
 #[cfg(not(all(target_arch = "wasm64", target_vendor = "browserpod")))]
 use reqwest::Identity;
+#[cfg(not(all(target_arch = "wasm64", target_vendor = "browserpod")))]
+use reqwest::redirect::Policy;
 use reqwest::{dns::{self, Addrs}, header::{HeaderName, HeaderValue}, Body, Certificate, Client, ClientBuilder, Method, Proxy, RequestBuilder, Response, Url};
 use tokio::sync::OnceCell;
 use wax::Program;
@@ -111,6 +113,53 @@ fn new_resolver() -> TokioResolver {
 
     builder.options_mut().ip_strategy = LookupIpStrategy::Ipv4AndIpv6;
     builder.build()
+}
+
+#[cfg(not(all(target_arch = "wasm64", target_vendor = "browserpod")))]
+fn redirect_policy(config: &Configuration) -> Policy {
+    let default_policy
+        = Policy::default();
+
+    let authenticated_node_dist_url = Url::parse(&config.settings.node_dist_url.value).ok()
+        .and_then(|mut node_dist_url| {
+            if !node_dist_url.path().ends_with('/') {
+                let path
+                    = format!("{}/", node_dist_url.path());
+                node_dist_url.set_path(&path);
+            }
+
+            config.settings.node_dist_auth.iter()
+                .filter(|(_, authentication)| authentication.authorization.value.is_some())
+                .filter_map(|(candidate, _)| Url::parse(candidate).ok())
+                .map(|mut candidate| {
+                    if !candidate.path().ends_with('/') {
+                        let path
+                            = format!("{}/", candidate.path());
+                        candidate.set_path(&path);
+                    }
+
+                    candidate
+                })
+                .any(|candidate| candidate == node_dist_url)
+                .then_some(node_dist_url)
+        });
+
+    Policy::custom(move |attempt| {
+        if let (Some(base_url), Some(previous)) = (&authenticated_node_dist_url, attempt.previous().last()) {
+            let is_within_base = |url: &Url| {
+                url.scheme() == base_url.scheme()
+                    && url.host_str() == base_url.host_str()
+                    && url.port_or_known_default() == base_url.port_or_known_default()
+                    && url.path().starts_with(base_url.path())
+            };
+
+            if is_within_base(previous) && !is_within_base(attempt.url()) {
+                return attempt.error("refusing to redirect an authenticated Node.js distribution request outside its configured base URL");
+            }
+        }
+
+        default_policy.redirect(attempt)
+    })
 }
 
 pub struct HttpClient {
@@ -298,6 +347,9 @@ impl HttpClient {
 
         #[cfg(not(all(target_arch = "wasm64", target_vendor = "browserpod")))]
         let client_builder = client_builder.use_rustls_tls();
+
+        #[cfg(not(all(target_arch = "wasm64", target_vendor = "browserpod")))]
+        let client_builder = client_builder.redirect(redirect_policy(config));
 
         let mut client_builder = client_builder
             // Connection pooling settings

@@ -1208,23 +1208,32 @@
         }
       ]
     },
-    "nodeDistAuthHeader": {
+    "nodeDistAuth": {
       "_package": "@yarnpkg/core",
-      "title": "Authorization header to send when downloading Node.js distributions.",
-      "description": "When specified, the value will be sent as an `Authorization` header when fetching both the release index and distribution archives from `nodeDistUrl`. This is typically paired with a custom `nodeDistUrl` for an internal node.js distribution mirror.",
-      "type": ["string", "null"],
+      "title": "Authorization headers for Node.js distribution URLs.",
+      "description": "Defines credentials for specific Node.js distribution base URLs. An authorization header is sent only when the normalized URL key exactly matches `nodeDistUrl`, including its path. This prevents credentials configured for one mirror from being sent to another URL.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "authorization": {
+            "type": ["string", "null"],
+            "description": "The complete value to send in the `Authorization` header."
+          }
+        }
+      },
       "_examples": [
         {
-          "description": "Do not pass an `Authorization` header.",
-          "value": null
+          "description": "Do not configure authentication for any Node.js distribution URL.",
+          "value": {}
         },
         {
-          "description": "Pass a Bearer token in the `Authorization` header.",
-          "value": "Bearer a-token-here"
-        },
-        {
-          "description": "Pass a Bearer token from an environment variable.",
-          "value": "Bearer ${NODE_DIST_BEARER_TOKEN}"
+          "description": "Authenticate to an internal Node.js distribution mirror using an environment-provided Bearer token.",
+          "value": {
+            "https://artifacts.example.com/nodejs/dist": {
+              "authorization": "Bearer ${NODE_DIST_BEARER_TOKEN}"
+            }
+          }
         }
       ]
     },
